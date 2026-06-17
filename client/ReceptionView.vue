@@ -243,13 +243,14 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { storeToRefs } from 'pinia'
 import { useQueueStore } from './stores/queue'
 import { formatDuration as formatDur, speakQueueNumber, maskName } from './types'
 import type { Patient } from './types'
 
 const store = useQueueStore()
-
-const { queue, completed, departments, preRegistered, wsConnected, connectWebSocket, disconnectWebSocket } = store
+const { queue, completed, departments, preRegistered, wsConnected } = storeToRefs(store)
+const { connectWebSocket, disconnectWebSocket, fetchAllData, createPatient, activatePatient, prioritizePatient, markMissed, requeuePatient, exportCSV } = store
 
 const form = ref({
   name: '',
@@ -263,7 +264,7 @@ const filterDept = ref('')
 const tickTimer = ref<ReturnType<typeof setInterval> | null>(null)
 
 const filteredQueue = computed(() => {
-  let result = queue.filter(p => p.status === 'waiting' || p.status === 'visiting')
+  let result = queue.value.filter(p => p.status === 'waiting' || p.status === 'visiting')
   if (filterDept.value) {
     result = result.filter(p => p.department === filterDept.value)
   }
@@ -281,7 +282,7 @@ function formatDuration(seconds: number) {
 }
 
 function getWaitDuration(p: Patient): number {
-  if (!p.checkInTime) return 0
+  if (!p.checkInTime) return p.waitDuration ?? 0
   return Math.floor((Date.now() - new Date(p.checkInTime).getTime()) / 1000)
 }
 
@@ -321,7 +322,7 @@ function getStatusText(status: string): string {
 
 async function handleCreatePatient() {
   try {
-    const result = await store.createPatient({
+    const result = await createPatient({
       name: form.value.name,
       phoneLast4: form.value.phoneLast4,
       department: form.value.department,
@@ -347,7 +348,7 @@ async function handleCreatePatient() {
 
 async function handleActivate(id: number) {
   try {
-    await store.activatePatient(id)
+    await activatePatient(id)
   } catch (e: any) {
     alert(e.message || '激活失败')
   }
@@ -355,7 +356,7 @@ async function handleActivate(id: number) {
 
 async function handlePrioritize(id: number) {
   try {
-    await store.prioritizePatient(id)
+    await prioritizePatient(id)
   } catch (e: any) {
     alert(e.message || '操作失败')
   }
@@ -364,7 +365,7 @@ async function handlePrioritize(id: number) {
 async function handleMissed(id: number) {
   if (!confirm('确认标记为过号？')) return
   try {
-    await store.markMissed(id)
+    await markMissed(id)
   } catch (e: any) {
     alert(e.message || '操作失败')
   }
@@ -372,7 +373,7 @@ async function handleMissed(id: number) {
 
 async function handleRequeue(id: number) {
   try {
-    await store.requeuePatient(id)
+    await requeuePatient(id)
   } catch (e: any) {
     alert(e.message || '操作失败')
   }
@@ -380,13 +381,14 @@ async function handleRequeue(id: number) {
 
 async function handleExport() {
   try {
-    await store.exportCSV()
+    await exportCSV()
   } catch (e: any) {
     alert(e.message || '导出失败')
   }
 }
 
 onMounted(() => {
+  fetchAllData()
   connectWebSocket('reception')
   tickTimer.value = setInterval(() => {
   }, 1000)

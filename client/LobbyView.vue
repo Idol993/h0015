@@ -81,8 +81,11 @@
                       >
                         等待 {{ formatDuration(getWaitDuration(item)) }}
                       </span>
-                      <span class="text-sm text-gray-500 w-24 text-right">
-                        预计 {{ formatDuration((item.estimatedWait !== undefined ? item.estimatedWait : index * 900)) }}
+                      <span
+                        class="text-sm w-28 text-right"
+                        :class="item.estimatedWaitWarn ? 'text-yellow-500 font-medium' : 'text-gray-500'"
+                      >
+                        预计 {{ formatDuration(item.estimatedWait !== undefined ? item.estimatedWait : index * 900) }}
                       </span>
                     </div>
                   </div>
@@ -104,6 +107,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { storeToRefs } from 'pinia'
 import { useQueueStore } from './stores/queue'
 import { formatDuration as formatDur } from './types'
 import type { Patient } from './types'
@@ -111,7 +115,8 @@ import { RecycleScroller } from 'vue-virtual-scroller'
 import 'vue-virtual-scroller/dist/vue-virtual-scroller.css'
 
 const store = useQueueStore()
-const { departments, connectWebSocket, disconnectWebSocket, getVisitingPatient, getDepartmentQueue, lastCallNumber } = store
+const { departments, lastCallNumber } = storeToRefs(store)
+const { connectWebSocket, disconnectWebSocket, fetchAllData, getVisitingPatient, getDepartmentQueue } = store
 
 const currentTime = ref('')
 const currentDate = ref('')
@@ -123,7 +128,7 @@ function formatDuration(seconds: number): string {
 }
 
 function getWaitDuration(p: Patient): number {
-  if (!p.checkInTime) return 0
+  if (!p.checkInTime) return p.waitDuration ?? 0
   return Math.floor((Date.now() - new Date(p.checkInTime).getTime()) / 1000)
 }
 
@@ -144,16 +149,19 @@ function updateTime() {
   })
 }
 
-watch(lastCallNumber, (newVal) => {
+watch(lastCallNumber, (newVal, oldVal) => {
   Object.keys(newVal).forEach(dept => {
-    showAnimation.value[dept] = true
-    setTimeout(() => {
-      showAnimation.value[dept] = false
-    }, 1500)
+    if (newVal[dept] !== oldVal?.[dept]) {
+      showAnimation.value[dept] = true
+      setTimeout(() => {
+        showAnimation.value[dept] = false
+      }, 1500)
+    }
   })
 }, { deep: true })
 
 onMounted(() => {
+  fetchAllData()
   connectWebSocket('lobby')
   updateTime()
   timer = setInterval(updateTime, 1000)

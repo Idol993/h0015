@@ -176,7 +176,7 @@ func getQueueWithEstimates(deptName string) ([]map[string]interface{}, error) {
 			"checkInTime":     p.CheckInTime,
 			"waitDuration":    waitDuration,
 			"estimatedWait":   estimatedWait,
-			"estimatedWaitWarn": estimatedWait > 900,
+			"estimatedWaitWarn": waitDuration > estimatedWait + 900,
 		}
 	}
 	return result, nil
@@ -468,7 +468,14 @@ func requeuePatient(c *gin.Context) {
 		return
 	}
 
+	var maxQueueNum int
+	tx.Model(&Patient{}).
+		Where("department = ? AND DATE(created_at) = DATE('now')", patient.Department).
+		Select("COALESCE(MAX(queue_number), 0)").
+		Scan(&maxQueueNum)
+
 	patient.Status = StatusWaiting
+	patient.QueueNumber = maxQueueNum + 1
 	patient.Priority = true
 	now := time.Now()
 	patient.CheckInTime = &now
@@ -518,11 +525,39 @@ func prioritizePatient(c *gin.Context) {
 func getQueue(c *gin.Context) {
 	dept := c.Query("department")
 	if dept == "" {
-		var patients []Patient
-		db.Where("status IN ?", []PatientStatus{StatusWaiting, StatusVisiting}).
-			Order("department, priority DESC, queue_number ASC").
-			Find(&patients)
-		c.JSON(http.StatusOK, patients)
+		var allDepts []Department
+		db.Find(&allDepts)
+		var result []map[string]interface{}{}
+		for _, d := range allDepts {
+			queue, err := getQueueWithEstimates(d.Name)
+			if err != nil {
+				continue
+			}
+			result = append(result, queue...)
+		}
+		var visiting []Patient
+		db.Where("status = ?", StatusVisiting).Order("department, priority DESC, queue_number ASC").Find(&visiting)
+		for _, p := range visiting {
+			var waitDuration int
+			if p.CheckInTime != nil {
+				waitDuration = int(time.Since(*p.CheckInTime).Seconds())
+			}
+			result = append(result, map[string]interface{}{
+				"id":            p.ID,
+				"name":          maskName(p.Name),
+				"phoneLast4":    p.PhoneLast4,
+				"department":    p.Department,
+				"queueNumber":   p.QueueNumber,
+				"status":        p.Status,
+				"priority":      p.Priority,
+				"missedCount":   p.MissedCount,
+				"checkInTime":   p.CheckInTime,
+				"waitDuration":  waitDuration,
+				"estimatedWait": 0,
+				"estimatedWaitWarn": false,
+			})
+		}
+		c.JSON(http.StatusOK, result)
 		return
 	}
 

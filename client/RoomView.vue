@@ -2,7 +2,7 @@
   <div class="min-h-screen bg-white flex flex-col items-center justify-between py-12 px-8">
     <header class="w-full max-w-4xl flex items-center justify-between">
       <div>
-        <h1 class="text-3xl font-bold text-gray-800">{{ currentDepartment }}</h1>
+        <h1 class="text-3xl font-bold text-gray-800">{{ currentDepartment || '加载中...' }}</h1>
         <p class="text-gray-500 mt-1">诊室叫号系统</p>
       </div>
       <div class="flex items-center gap-3">
@@ -15,7 +15,23 @@
       </div>
     </header>
 
-    <main class="flex-1 flex flex-col items-center justify-center w-full max-w-4xl">
+    <div v-if="deptError" class="flex-1 flex flex-col items-center justify-center w-full max-w-4xl">
+      <div class="text-center">
+        <div class="text-8xl font-bold text-red-300 mb-8">⚠</div>
+        <div class="text-3xl text-red-500 font-semibold mb-4">科室未找到</div>
+        <div class="text-lg text-gray-500 mb-2">{{ deptError }}</div>
+        <div class="text-gray-400 mt-4">
+          可用的科室房间编号：
+          <span v-for="(d, i) in departments" :key="d.id">
+            <router-link :to="`/room/${d.id}`" class="text-blue-500 hover:underline">{{ d.id }}</router-link>
+            <span class="text-gray-400">（{{ d.name }}）</span>
+            <span v-if="i < departments.length - 1">、</span>
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <main v-else class="flex-1 flex flex-col items-center justify-center w-full max-w-4xl">
       <div v-if="currentPatient" class="text-center">
         <div class="text-gray-400 text-lg mb-4">当前就诊</div>
         <div
@@ -44,7 +60,7 @@
       </div>
     </main>
 
-    <footer class="w-full max-w-4xl">
+    <footer v-if="!deptError" class="w-full max-w-4xl">
       <div class="flex items-center justify-center gap-6">
         <button
           @click="handleCallNext"
@@ -68,33 +84,47 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
+import { storeToRefs } from 'pinia'
 import { useQueueStore } from './stores/queue'
 import { speakQueueNumber } from './types'
 
 const route = useRoute()
 const store = useQueueStore()
-
-const { departments, wsConnected, connectWebSocket, disconnectWebSocket, getVisitingPatient, getDepartmentQueue, callNext, markMissed } = store
+const { departments, wsConnected } = storeToRefs(store)
+const { connectWebSocket, disconnectWebSocket, fetchAllData, getVisitingPatient, getDepartmentQueue, callNext, markMissed } = store
 
 const calling = ref(false)
 const showCallAnimation = ref(false)
+const deptError = ref('')
 
 const currentDepartment = computed(() => {
-  const deptId = String(route.params.id)
-  const dept = departments.find(d => d.id === Number(deptId) || d.name === deptId)
-  return dept?.name || deptId
+  const routeId = String(route.params.id)
+  const dept = departments.value.find(d => String(d.id) === routeId || d.name === routeId)
+  return dept?.name || ''
 })
 
 const currentPatient = computed(() => {
+  if (!currentDepartment.value) return null
   return getVisitingPatient(currentDepartment.value)
 })
 
 const waitingCount = computed(() => {
+  if (!currentDepartment.value) return 0
   return getDepartmentQueue(currentDepartment.value).length
 })
 
+watch([() => route.params.id, departments], () => {
+  const routeId = String(route.params.id)
+  const dept = departments.value.find(d => String(d.id) === routeId || d.name === routeId)
+  if (!dept && departments.value.length > 0) {
+    deptError.value = `房间编号 "${routeId}" 不存在，请检查地址`
+  } else {
+    deptError.value = ''
+  }
+}, { immediate: true })
+
 async function handleCallNext() {
-  if (calling.value) return
+  if (calling.value || !currentDepartment.value) return
   calling.value = true
   try {
     const result = await callNext(currentDepartment.value)
@@ -134,7 +164,8 @@ watch(() => currentPatient.value?.queueNumber, (newVal, oldVal) => {
 })
 
 onMounted(() => {
-  connectWebSocket('room', currentDepartment.value)
+  fetchAllData()
+  connectWebSocket('room', currentDepartment.value || String(route.params.id))
 })
 
 onUnmounted(() => {
