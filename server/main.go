@@ -371,6 +371,89 @@ func activatePatient(c *gin.Context) {
 	broadcastQueueUpdate(patient.Department)
 }
 
+func completePatient(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的ID"})
+		return
+	}
+
+	tx := db.Begin()
+
+	var patient Patient
+	if err := tx.First(&patient, uint(id)).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusNotFound, gin.H{"error": "患者不存在"})
+		return
+	}
+
+	if patient.Status != StatusVisiting {
+		tx.Rollback()
+		c.JSON(http.StatusBadRequest, gin.H{"error": "只有就诊中患者可以完成"})
+		return
+	}
+
+	now := time.Now()
+	patient.Status = StatusCompleted
+	patient.VisitEndTime = &now
+
+	if err := tx.Save(&patient).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	if patient.RoomID != nil {
+		tx.Model(&Room{}).Where("id = ?", *patient.RoomID).Update("current_patient_id", nil)
+	}
+
+	tx.Commit()
+
+	c.JSON(http.StatusOK, patient)
+	broadcastQueueUpdate(patient.Department)
+}
+
+func deletePatient(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的ID"})
+		return
+	}
+
+	tx := db.Begin()
+
+	var patient Patient
+	if err := tx.First(&patient, uint(id)).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusNotFound, gin.H{"error": "患者不存在"})
+		return
+	}
+
+	deptName := patient.Department
+
+	if err := tx.Delete(&patient).Error; err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	tx.Commit()
+
+	c.JSON(http.StatusOK, gin.H{"success": true})
+	broadcastQueueUpdate(deptName)
+}
+
+func activeTodayScope(tx *gorm.DB) *gorm.DB {
+	return tx.Where(`
+		status IN (?)
+		OR DATE(created_at) = DATE('now')
+		OR (check_in_time IS NOT NULL AND DATE(check_in_time) = DATE('now'))
+		OR (visit_start_time IS NOT NULL AND DATE(visit_start_time) = DATE('now'))
+		OR (visit_end_time IS NOT NULL AND DATE(visit_end_time) = DATE('now'))
+		OR DATE(updated_at) = DATE('now')
+	`, []PatientStatus{StatusWaiting, StatusVisiting, StatusPreRegistered})
+}
+
 func callNext(c *gin.Context) {
 	var req struct {
 		RoomID uint `json:"roomId" binding:"required"`
@@ -626,7 +709,8 @@ func getQueue(c *gin.Context) {
 
 func getCompleted(c *gin.Context) {
 	var patients []Patient
-	db.Where("status IN ?", []PatientStatus{StatusCompleted, StatusMissed}).
+	db.Scopes(activeTodayScope).
+		Where("status IN ?", []PatientStatus{StatusCompleted, StatusMissed}).
 		Order("updated_at DESC").
 		Limit(30).
 		Find(&patients)
@@ -742,15 +826,15 @@ func getDashboard(c *gin.Context) {
 	for _, d := range departments {
 		stat := DeptDashboard{Department: d.Name}
 
-		db.Model(&Patient{}).Where("department = ? AND DATE(created_at) = DATE('now') AND status != ?",
+		db.Model(&Patient{}).Scopes(activeTodayScope).Where("department = ? AND status != ?",
 			d.Name, StatusPreRegistered).Count(&stat.CheckedIn)
-		db.Model(&Patient{}).Where("department = ? AND DATE(created_at) = DATE('now') AND status = ?",
+		db.Model(&Patient{}).Scopes(activeTodayScope).Where("department = ? AND status = ?",
 			d.Name, StatusWaiting).Count(&stat.Waiting)
-		db.Model(&Patient{}).Where("department = ? AND DATE(created_at) = DATE('now') AND status = ?",
+		db.Model(&Patient{}).Scopes(activeTodayScope).Where("department = ? AND status = ?",
 			d.Name, StatusVisiting).Count(&stat.Visiting)
-		db.Model(&Patient{}).Where("department = ? AND DATE(created_at) = DATE('now') AND status = ?",
+		db.Model(&Patient{}).Scopes(activeTodayScope).Where("department = ? AND status = ?",
 			d.Name, StatusCompleted).Count(&stat.Completed)
-		db.Model(&Patient{}).Where("department = ? AND DATE(created_at) = DATE('now') AND status = ?",
+		db.Model(&Patient{}).Scopes(activeTodayScope).Where("department = ? AND status = ?",
 			d.Name, StatusMissed).Count(&stat.Missed)
 		db.Model(&Patient{}).Where("department = ? AND status = ?",
 			d.Name, StatusPreRegistered).Count(&stat.PreRegistered)
@@ -758,16 +842,17 @@ func getDashboard(c *gin.Context) {
 		stat.TotalSeen = stat.Completed + stat.Missed
 
 		var missedRows []Patient
-		db.Select("COALESCE(SUM(missed_count), 0) as missed_count").
-			Where("department = ? AND DATE(created_at) = DATE('now')", d.Name).
+		db.Model(&Patient{}).Scopes(activeTodayScope).
+			Select("COALESCE(SUM(missed_count), 0) as missed_count").
+			Where("department = ?", d.Name).
 			Find(&missedRows)
 		for _, r := range missedRows {
 			stat.MissedCountSum += int64(r.MissedCount)
 		}
 
 		var activatedCount int64
-		db.Model(&Patient{}).
-			Where("department = ? AND DATE(created_at) = DATE('now') AND appointment_time IS NOT NULL AND status != ?",
+		db.Model(&Patient{}).Scopes(activeTodayScope).
+			Where("department = ? AND appointment_time IS NOT NULL AND status != ?",
 				d.Name, StatusPreRegistered).
 			Count(&activatedCount)
 		stat.ApptActivated = activatedCount
@@ -794,7 +879,7 @@ func getDashboard(c *gin.Context) {
 
 func exportCSV(c *gin.Context) {
 	var patients []Patient
-	db.Where("DATE(created_at) = DATE('now')").
+	db.Scopes(activeTodayScope).
 		Order("created_at ASC").
 		Find(&patients)
 
@@ -824,31 +909,31 @@ func exportCSV(c *gin.Context) {
 
 	for _, d := range departments {
 		stat := &DeptDashboard{Department: d.Name}
-		db.Model(&Patient{}).Where("department = ? AND DATE(created_at) = DATE('now') AND status != ?",
+		db.Model(&Patient{}).Scopes(activeTodayScope).Where("department = ? AND status != ?",
 			d.Name, StatusPreRegistered).Count(&stat.CheckedIn)
-		db.Model(&Patient{}).Where("department = ? AND DATE(created_at) = DATE('now') AND status = ?",
+		db.Model(&Patient{}).Scopes(activeTodayScope).Where("department = ? AND status = ?",
 			d.Name, StatusWaiting).Count(&stat.Waiting)
-		db.Model(&Patient{}).Where("department = ? AND DATE(created_at) = DATE('now') AND status = ?",
+		db.Model(&Patient{}).Scopes(activeTodayScope).Where("department = ? AND status = ?",
 			d.Name, StatusVisiting).Count(&stat.Visiting)
-		db.Model(&Patient{}).Where("department = ? AND DATE(created_at) = DATE('now') AND status = ?",
+		db.Model(&Patient{}).Scopes(activeTodayScope).Where("department = ? AND status = ?",
 			d.Name, StatusCompleted).Count(&stat.Completed)
-		db.Model(&Patient{}).Where("department = ? AND DATE(created_at) = DATE('now') AND status = ?",
+		db.Model(&Patient{}).Scopes(activeTodayScope).Where("department = ? AND status = ?",
 			d.Name, StatusMissed).Count(&stat.Missed)
 		db.Model(&Patient{}).Where("department = ? AND status = ?",
 			d.Name, StatusPreRegistered).Count(&stat.PreRegistered)
 		stat.TotalSeen = stat.Completed + stat.Missed
 
 		var missedRows []Patient
-		db.Model(&Patient{}).
-			Where("department = ? AND DATE(created_at) = DATE('now')", d.Name).
+		db.Model(&Patient{}).Scopes(activeTodayScope).
+			Where("department = ?", d.Name).
 			Find(&missedRows)
 		for _, r := range missedRows {
 			stat.MissedCountSum += int64(r.MissedCount)
 		}
 
 		var activatedCount int64
-		db.Model(&Patient{}).
-			Where("department = ? AND DATE(created_at) = DATE('now') AND appointment_time IS NOT NULL AND status != ?",
+		db.Model(&Patient{}).Scopes(activeTodayScope).
+			Where("department = ? AND appointment_time IS NOT NULL AND status != ?",
 				d.Name, StatusPreRegistered).
 			Count(&activatedCount)
 		stat.ApptActivated = activatedCount
@@ -1035,9 +1120,11 @@ func main() {
 	{
 		api.POST("/patients", createPatient)
 		api.POST("/patients/:id/activate", activatePatient)
+		api.POST("/patients/:id/complete", completePatient)
 		api.POST("/patients/:id/missed", markMissed)
 		api.POST("/patients/:id/requeue", requeuePatient)
 		api.POST("/patients/:id/prioritize", prioritizePatient)
+		api.DELETE("/patients/:id", deletePatient)
 		api.POST("/call-next", callNext)
 
 		api.GET("/queue", getQueue)
