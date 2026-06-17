@@ -21,10 +21,10 @@ import (
 type PatientStatus string
 
 const (
-	StatusWaiting    PatientStatus = "waiting"
-	StatusVisiting   PatientStatus = "visiting"
-	StatusCompleted  PatientStatus = "completed"
-	StatusMissed     PatientStatus = "missed"
+	StatusWaiting       PatientStatus = "waiting"
+	StatusVisiting      PatientStatus = "visiting"
+	StatusCompleted     PatientStatus = "completed"
+	StatusMissed        PatientStatus = "missed"
 	StatusPreRegistered PatientStatus = "preregistered"
 )
 
@@ -37,7 +37,9 @@ type Patient struct {
 	QueueNumber     int            `gorm:"index" json:"queueNumber"`
 	Status          PatientStatus  `gorm:"not null;index" json:"status"`
 	Priority        bool           `gorm:"default:false" json:"priority"`
+	DisplayPriority bool           `gorm:"default:false" json:"displayPriority"`
 	MissedCount     int            `gorm:"default:0" json:"missedCount"`
+	RoomID          *uint          `json:"roomId,omitempty"`
 	CheckInTime     *time.Time     `json:"checkInTime,omitempty"`
 	VisitStartTime  *time.Time     `json:"visitStartTime,omitempty"`
 	VisitEndTime    *time.Time     `json:"visitEndTime,omitempty"`
@@ -46,13 +48,22 @@ type Patient struct {
 }
 
 type Department struct {
-	ID             uint      `gorm:"primaryKey" json:"id"`
-	Name           string    `gorm:"not null;uniqueIndex" json:"name"`
-	CurrentCall    int       `gorm:"default:0" json:"currentCall"`
-	DoctorOnDuty   bool      `gorm:"default:true" json:"doctorOnDuty"`
-	AvgVisitDuration int     `gorm:"default:900" json:"avgVisitDuration"`
-	CreatedAt      time.Time `json:"createdAt"`
-	UpdatedAt      time.Time `json:"updatedAt"`
+	ID               uint      `gorm:"primaryKey" json:"id"`
+	Name             string    `gorm:"not null;uniqueIndex" json:"name"`
+	DoctorOnDuty     bool      `gorm:"default:true" json:"doctorOnDuty"`
+	AvgVisitDuration int       `gorm:"default:900" json:"avgVisitDuration"`
+	CreatedAt        time.Time `json:"createdAt"`
+	UpdatedAt        time.Time `json:"updatedAt"`
+}
+
+type Room struct {
+	ID               uint      `gorm:"primaryKey" json:"id"`
+	Name             string    `gorm:"not null" json:"name"`
+	DepartmentID     uint      `gorm:"not null;index" json:"departmentId"`
+	DepartmentName   string    `gorm:"not null" json:"departmentName"`
+	CurrentPatientID *uint     `json:"currentPatientId,omitempty"`
+	CreatedAt        time.Time `json:"createdAt"`
+	UpdatedAt        time.Time `json:"updatedAt"`
 }
 
 type WSMessage struct {
@@ -68,8 +79,8 @@ type WSClient struct {
 }
 
 var (
-	db   *gorm.DB
-	hub  *Hub
+	db       *gorm.DB
+	hub      *Hub
 	upgrader = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
 			return true
@@ -101,7 +112,7 @@ func initDB() {
 		log.Fatal("Failed to connect to database:", err)
 	}
 
-	err = db.AutoMigrate(&Patient{}, &Department{})
+	err = db.AutoMigrate(&Patient{}, &Department{}, &Room{})
 	if err != nil {
 		log.Fatal("Failed to migrate database:", err)
 	}
@@ -110,8 +121,25 @@ func initDB() {
 	for _, name := range departments {
 		var count int64
 		db.Model(&Department{}).Where("name = ?", name).Count(&count)
+		var dept Department
 		if count == 0 {
-			db.Create(&Department{Name: name})
+			dept = Department{Name: name}
+			db.Create(&dept)
+		} else {
+			db.Where("name = ?", name).First(&dept)
+		}
+
+		for i := 1; i <= 2; i++ {
+			roomName := fmt.Sprintf("%s%d号诊室", name, i)
+			var roomCount int64
+			db.Model(&Room{}).Where("department_id = ? AND name = ?", dept.ID, roomName).Count(&roomCount)
+			if roomCount == 0 {
+				db.Create(&Room{
+					Name:           roomName,
+					DepartmentID:   dept.ID,
+					DepartmentName: dept.Name,
+				})
+			}
 		}
 	}
 }
@@ -135,20 +163,13 @@ func updateAvgVisitDuration(deptName string) {
 		}
 	}
 	avg := int(totalDuration / int64(len(patients)))
-
 	db.Model(&Department{}).Where("name = ?", deptName).Update("avg_visit_duration", avg)
-}
-
-func getEstimatedWaitTime(deptName string, position int) int {
-	var dept Department
-	db.Where("name = ?", deptName).First(&dept)
-	return dept.AvgVisitDuration * position
 }
 
 func getQueueWithEstimates(deptName string) ([]map[string]interface{}, error) {
 	var patients []Patient
 	err := db.Where("department = ? AND status = ?", deptName, StatusWaiting).
-		Order("priority DESC, queue_number ASC").
+		Order("priority DESC, COALESCE(appointment_time, '9999-12-31') ASC, queue_number ASC").
 		Find(&patients).Error
 	if err != nil {
 		return nil, err
@@ -164,18 +185,22 @@ func getQueueWithEstimates(deptName string) ([]map[string]interface{}, error) {
 		if p.CheckInTime != nil {
 			waitDuration = int(time.Since(*p.CheckInTime).Seconds())
 		}
+		showPriority := p.Priority || p.DisplayPriority
 		result[i] = map[string]interface{}{
-			"id":              p.ID,
-			"name":            maskName(p.Name),
-			"phoneLast4":      p.PhoneLast4,
-			"department":      p.Department,
-			"queueNumber":     p.QueueNumber,
-			"status":          p.Status,
-			"priority":        p.Priority,
-			"missedCount":     p.MissedCount,
-			"checkInTime":     p.CheckInTime,
-			"waitDuration":    waitDuration,
-			"estimatedWait":   estimatedWait,
+			"id":                p.ID,
+			"name":              maskName(p.Name),
+			"phoneLast4":        p.PhoneLast4,
+			"department":        p.Department,
+			"queueNumber":       p.QueueNumber,
+			"status":            p.Status,
+			"priority":          showPriority,
+			"displayPriority":   p.DisplayPriority,
+			"realPriority":      p.Priority,
+			"missedCount":       p.MissedCount,
+			"checkInTime":       p.CheckInTime,
+			"appointmentTime":   p.AppointmentTime,
+			"waitDuration":      waitDuration,
+			"estimatedWait":     estimatedWait,
 			"estimatedWaitWarn": waitDuration > estimatedWait + 900,
 		}
 	}
@@ -210,7 +235,6 @@ func (c *WSClient) readPump() {
 		hub.unregister <- c
 		c.Conn.Close()
 	}()
-
 	for {
 		_, _, err := c.Conn.ReadMessage()
 		if err != nil {
@@ -226,7 +250,6 @@ func (c *WSClient) writePump() {
 	defer func() {
 		c.Conn.Close()
 	}()
-
 	for message := range c.Send {
 		c.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 		if err := c.Conn.WriteMessage(websocket.TextMessage, message); err != nil {
@@ -246,7 +269,6 @@ func createPatient(c *gin.Context) {
 		Priority        bool       `json:"priority"`
 		PreRegistered   bool       `json:"preRegistered"`
 	}
-
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -282,6 +304,7 @@ func createPatient(c *gin.Context) {
 		QueueNumber:     maxQueueNum + 1,
 		Status:          status,
 		Priority:        req.Priority,
+		DisplayPriority: false,
 		CheckInTime:     checkInTime,
 	}
 
@@ -290,7 +313,6 @@ func createPatient(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
 	tx.Commit()
 
 	c.JSON(http.StatusCreated, gin.H{
@@ -327,8 +349,15 @@ func activatePatient(c *gin.Context) {
 		return
 	}
 
+	var maxQueueNum int
+	tx.Model(&Patient{}).
+		Where("department = ? AND DATE(created_at) = DATE('now')", patient.Department).
+		Select("COALESCE(MAX(queue_number), 0)").
+		Scan(&maxQueueNum)
+
 	now := time.Now()
 	patient.Status = StatusWaiting
+	patient.QueueNumber = maxQueueNum + 1
 	patient.CheckInTime = &now
 
 	if err := tx.Save(&patient).Error; err != nil {
@@ -336,7 +365,6 @@ func activatePatient(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
 	tx.Commit()
 
 	c.JSON(http.StatusOK, patient)
@@ -345,35 +373,47 @@ func activatePatient(c *gin.Context) {
 
 func callNext(c *gin.Context) {
 	var req struct {
-		Department string `json:"department" binding:"required"`
+		RoomID uint `json:"roomId" binding:"required"`
 	}
-
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
+	var room Room
+	if err := db.Where("id = ?", req.RoomID).First(&room).Error; err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "诊室不存在"})
+		return
+	}
+
 	tx := db.Begin()
 
-	var currentVisiting Patient
-	result := tx.Where("department = ? AND status = ?", req.Department, StatusVisiting).First(&currentVisiting)
-	if result.Error == nil {
-		now := time.Now()
-		currentVisiting.Status = StatusCompleted
-		currentVisiting.VisitEndTime = &now
-		if err := tx.Save(&currentVisiting).Error; err != nil {
-			tx.Rollback()
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "更新当前患者状态失败"})
-			return
+	if room.CurrentPatientID != nil {
+		var currentVisiting Patient
+		if err := tx.First(&currentVisiting, *room.CurrentPatientID).Error; err == nil {
+			now := time.Now()
+			currentVisiting.Status = StatusCompleted
+			currentVisiting.VisitEndTime = &now
+			if err := tx.Save(&currentVisiting).Error; err != nil {
+				tx.Rollback()
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "更新当前患者状态失败"})
+				return
+			}
 		}
 	}
 
 	var nextPatient Patient
-	err := tx.Where("department = ? AND status = ?", req.Department, StatusWaiting).
-		Order("priority DESC, queue_number ASC").
+	err := tx.Where("department = ? AND status = ?", room.DepartmentName, StatusWaiting).
+		Order("priority DESC, COALESCE(appointment_time, '9999-12-31') ASC, queue_number ASC").
 		First(&nextPatient).Error
 
 	if err != nil {
+		room.CurrentPatientID = nil
+		if err := tx.Save(&room).Error; err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "更新诊室状态失败"})
+			return
+		}
 		tx.Commit()
 		c.JSON(http.StatusOK, gin.H{"message": "没有等待的患者", "nextPatient": nil})
 		return
@@ -382,29 +422,25 @@ func callNext(c *gin.Context) {
 	now := time.Now()
 	nextPatient.Status = StatusVisiting
 	nextPatient.VisitStartTime = &now
+	roomID := room.ID
+	nextPatient.RoomID = &roomID
 	if err := tx.Save(&nextPatient).Error; err != nil {
 		tx.Rollback()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新下一位患者状态失败"})
 		return
 	}
 
-	var dept Department
-	if err := tx.Where("name = ?", req.Department).First(&dept).Error; err != nil {
+	nextPatientID := nextPatient.ID
+	room.CurrentPatientID = &nextPatientID
+	if err := tx.Save(&room).Error; err != nil {
 		tx.Rollback()
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "科室不存在"})
-		return
-	}
-
-	dept.CurrentCall = nextPatient.QueueNumber
-	if err := tx.Save(&dept).Error; err != nil {
-		tx.Rollback()
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新科室叫号失败"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新诊室叫号失败"})
 		return
 	}
 
 	tx.Commit()
 
-	go updateAvgVisitDuration(req.Department)
+	go updateAvgVisitDuration(room.DepartmentName)
 
 	response := gin.H{
 		"message": "叫号成功",
@@ -413,12 +449,17 @@ func callNext(c *gin.Context) {
 			"name":        maskName(nextPatient.Name),
 			"queueNumber": nextPatient.QueueNumber,
 			"department":  nextPatient.Department,
+			"roomId":      room.ID,
+			"roomName":    room.Name,
 		},
-		"currentCall": dept.CurrentCall,
+		"room": gin.H{
+			"id":   room.ID,
+			"name": room.Name,
+		},
 	}
 
 	c.JSON(http.StatusOK, response)
-	broadcastCallNext(req.Department, nextPatient)
+	broadcastCallNext(room.DepartmentName, room, nextPatient)
 }
 
 func markMissed(c *gin.Context) {
@@ -440,12 +481,20 @@ func markMissed(c *gin.Context) {
 	patient.Status = StatusMissed
 	patient.MissedCount += 1
 
+	if patient.RoomID != nil {
+		var room Room
+		if err := tx.Where("id = ?", *patient.RoomID).First(&room).Error; err == nil {
+			room.CurrentPatientID = nil
+			tx.Save(&room)
+		}
+	}
+	patient.RoomID = nil
+
 	if err := tx.Save(&patient).Error; err != nil {
 		tx.Rollback()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
 	tx.Commit()
 
 	c.JSON(http.StatusOK, patient)
@@ -476,7 +525,9 @@ func requeuePatient(c *gin.Context) {
 
 	patient.Status = StatusWaiting
 	patient.QueueNumber = maxQueueNum + 1
-	patient.Priority = true
+	patient.DisplayPriority = true
+	patient.Priority = false
+	patient.RoomID = nil
 	now := time.Now()
 	patient.CheckInTime = &now
 
@@ -485,7 +536,6 @@ func requeuePatient(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
 	tx.Commit()
 
 	c.JSON(http.StatusOK, patient)
@@ -509,13 +559,13 @@ func prioritizePatient(c *gin.Context) {
 	}
 
 	patient.Priority = true
+	patient.DisplayPriority = true
 
 	if err := tx.Save(&patient).Error; err != nil {
 		tx.Rollback()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
 	tx.Commit()
 
 	c.JSON(http.StatusOK, patient)
@@ -542,18 +592,22 @@ func getQueue(c *gin.Context) {
 			if p.CheckInTime != nil {
 				waitDuration = int(time.Since(*p.CheckInTime).Seconds())
 			}
+			showPriority := p.Priority || p.DisplayPriority
 			result = append(result, map[string]interface{}{
-				"id":            p.ID,
-				"name":          maskName(p.Name),
-				"phoneLast4":    p.PhoneLast4,
-				"department":    p.Department,
-				"queueNumber":   p.QueueNumber,
-				"status":        p.Status,
-				"priority":      p.Priority,
-				"missedCount":   p.MissedCount,
-				"checkInTime":   p.CheckInTime,
-				"waitDuration":  waitDuration,
-				"estimatedWait": 0,
+				"id":                p.ID,
+				"name":              maskName(p.Name),
+				"phoneLast4":        p.PhoneLast4,
+				"department":        p.Department,
+				"queueNumber":       p.QueueNumber,
+				"status":            p.Status,
+				"priority":          showPriority,
+				"displayPriority":   p.DisplayPriority,
+				"realPriority":      p.Priority,
+				"missedCount":       p.MissedCount,
+				"roomId":            p.RoomID,
+				"checkInTime":       p.CheckInTime,
+				"waitDuration":      waitDuration,
+				"estimatedWait":     0,
 				"estimatedWaitWarn": false,
 			})
 		}
@@ -587,35 +641,79 @@ func getDepartments(c *gin.Context) {
 		var waitingCount int64
 		db.Model(&Patient{}).Where("department = ? AND status = ?", d.Name, StatusWaiting).Count(&waitingCount)
 
-		var visiting Patient
-		visitingData := map[string]interface{}{}
-		if err := db.Where("department = ? AND status = ?", d.Name, StatusVisiting).First(&visiting).Error; err == nil {
-			visitingData = map[string]interface{}{
-				"id":          visiting.ID,
-				"name":        maskName(visiting.Name),
-				"queueNumber": visiting.QueueNumber,
+		var rooms []Room
+		db.Where("department_id = ?", d.ID).Find(&rooms)
+
+		roomsData := make([]map[string]interface{}, 0, len(rooms))
+		for _, r := range rooms {
+			roomInfo := map[string]interface{}{
+				"id":               r.ID,
+				"name":             r.Name,
+				"departmentId":     r.DepartmentID,
+				"departmentName":   r.DepartmentName,
+				"currentPatientId": r.CurrentPatientID,
+				"currentPatient":   nil,
 			}
+			if r.CurrentPatientID != nil {
+				var p Patient
+				if err := db.First(&p, *r.CurrentPatientID).Error; err == nil {
+					roomInfo["currentPatient"] = map[string]interface{}{
+						"id":          p.ID,
+						"name":        maskName(p.Name),
+						"queueNumber": p.QueueNumber,
+					}
+				}
+			}
+			roomsData = append(roomsData, roomInfo)
 		}
 
 		result[i] = map[string]interface{}{
 			"id":               d.ID,
 			"name":             d.Name,
-			"currentCall":      d.CurrentCall,
 			"doctorOnDuty":     d.DoctorOnDuty,
 			"avgVisitDuration": d.AvgVisitDuration,
 			"waitingCount":     waitingCount,
 			"estimatedWait":    d.AvgVisitDuration * int(waitingCount),
-			"visiting":         visitingData,
+			"rooms":            roomsData,
 		}
 	}
 
 	c.JSON(http.StatusOK, result)
 }
 
+func getRooms(c *gin.Context) {
+	var rooms []Room
+	db.Find(&rooms)
+
+	result := make([]map[string]interface{}, len(rooms))
+	for i, r := range rooms {
+		roomInfo := map[string]interface{}{
+			"id":               r.ID,
+			"name":             r.Name,
+			"departmentId":     r.DepartmentID,
+			"departmentName":   r.DepartmentName,
+			"currentPatientId": r.CurrentPatientID,
+			"currentPatient":   nil,
+		}
+		if r.CurrentPatientID != nil {
+			var p Patient
+			if err := db.First(&p, *r.CurrentPatientID).Error; err == nil {
+				roomInfo["currentPatient"] = map[string]interface{}{
+					"id":          p.ID,
+					"name":        maskName(p.Name),
+					"queueNumber": p.QueueNumber,
+				}
+			}
+		}
+		result[i] = roomInfo
+	}
+	c.JSON(http.StatusOK, result)
+}
+
 func getPreRegistered(c *gin.Context) {
 	var patients []Patient
 	db.Where("status = ?", StatusPreRegistered).
-		Order("appointment_time ASC").
+		Order("COALESCE(appointment_time, '9999-12-31') ASC, created_at ASC").
 		Find(&patients)
 	c.JSON(http.StatusOK, patients)
 }
@@ -633,10 +731,10 @@ func exportCSV(c *gin.Context) {
 	writer := csv.NewWriter(c.Writer)
 	defer writer.Flush()
 
-	writer.Write([]string{"排队号", "姓名", "科室", "签到时间", "就诊开始时间", "就诊结束时间", "就诊时长(秒)", "状态", "过号次数"})
+	writer.Write([]string{"排队号", "姓名", "科室", "诊室", "签到时间", "就诊开始时间", "就诊结束时间", "就诊时长(秒)", "状态", "过号次数", "预约时间"})
 
 	for _, p := range patients {
-		var checkInTime, visitStart, visitEnd string
+		var checkInTime, visitStart, visitEnd, apptTime, roomName string
 		var visitDuration int64
 
 		if p.CheckInTime != nil {
@@ -648,8 +746,17 @@ func exportCSV(c *gin.Context) {
 		if p.VisitEndTime != nil {
 			visitEnd = p.VisitEndTime.Format("2006-01-02 15:04:05")
 		}
+		if p.AppointmentTime != nil {
+			apptTime = p.AppointmentTime.Format("2006-01-02 15:04")
+		}
 		if p.VisitStartTime != nil && p.VisitEndTime != nil {
 			visitDuration = int64(p.VisitEndTime.Sub(*p.VisitStartTime).Seconds())
+		}
+		if p.RoomID != nil {
+			var r Room
+			if err := db.First(&r, *p.RoomID).Error; err == nil {
+				roomName = r.Name
+			}
 		}
 
 		statusMap := map[PatientStatus]string{
@@ -664,12 +771,14 @@ func exportCSV(c *gin.Context) {
 			strconv.Itoa(p.QueueNumber),
 			p.Name,
 			p.Department,
+			roomName,
 			checkInTime,
 			visitStart,
 			visitEnd,
 			strconv.FormatInt(visitDuration, 10),
 			statusMap[p.Status],
 			strconv.Itoa(p.MissedCount),
+			apptTime,
 		})
 	}
 }
@@ -685,25 +794,38 @@ func broadcastQueueUpdate(deptName string) {
 		var waitingCount int64
 		db.Model(&Patient{}).Where("department = ? AND status = ?", d.Name, StatusWaiting).Count(&waitingCount)
 
-		var visiting Patient
-		visitingData := map[string]interface{}{}
-		if err := db.Where("department = ? AND status = ?", d.Name, StatusVisiting).First(&visiting).Error; err == nil {
-			visitingData = map[string]interface{}{
-				"id":          visiting.ID,
-				"name":        maskName(visiting.Name),
-				"queueNumber": visiting.QueueNumber,
+		var rooms []Room
+		db.Where("department_id = ?", d.ID).Find(&rooms)
+		roomsData := make([]map[string]interface{}, 0, len(rooms))
+		for _, r := range rooms {
+			roomInfo := map[string]interface{}{
+				"id":               r.ID,
+				"name":             r.Name,
+				"departmentId":     r.DepartmentID,
+				"currentPatientId": r.CurrentPatientID,
+				"currentPatient":   nil,
 			}
+			if r.CurrentPatientID != nil {
+				var p Patient
+				if err := db.First(&p, *r.CurrentPatientID).Error; err == nil {
+					roomInfo["currentPatient"] = map[string]interface{}{
+						"id":          p.ID,
+						"name":        maskName(p.Name),
+						"queueNumber": p.QueueNumber,
+					}
+				}
+			}
+			roomsData = append(roomsData, roomInfo)
 		}
 
 		deptInfo = map[string]interface{}{
 			"id":               d.ID,
 			"name":             d.Name,
-			"currentCall":      d.CurrentCall,
 			"doctorOnDuty":     d.DoctorOnDuty,
 			"avgVisitDuration": d.AvgVisitDuration,
 			"waitingCount":     waitingCount,
 			"estimatedWait":    d.AvgVisitDuration * int(waitingCount),
-			"visiting":         visitingData,
+			"rooms":            roomsData,
 		}
 	}
 
@@ -719,11 +841,13 @@ func broadcastQueueUpdate(deptName string) {
 	hub.broadcast <- data
 }
 
-func broadcastCallNext(deptName string, patient Patient) {
+func broadcastCallNext(deptName string, room Room, patient Patient) {
 	msg := WSMessage{
 		Type: "call_next",
 		Payload: map[string]interface{}{
 			"department": deptName,
+			"roomId":     room.ID,
+			"roomName":   room.Name,
 			"patient": map[string]interface{}{
 				"id":          patient.ID,
 				"name":        maskName(patient.Name),
@@ -733,7 +857,6 @@ func broadcastCallNext(deptName string, patient Patient) {
 	}
 	data, _ := json.Marshal(msg)
 	hub.broadcast <- data
-
 	broadcastQueueUpdate(deptName)
 }
 
@@ -765,6 +888,7 @@ func main() {
 		api.GET("/queue", getQueue)
 		api.GET("/completed", getCompleted)
 		api.GET("/departments", getDepartments)
+		api.GET("/rooms", getRooms)
 		api.GET("/preregistered", getPreRegistered)
 		api.GET("/export", exportCSV)
 	}

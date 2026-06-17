@@ -39,17 +39,39 @@
             </div>
 
             <div class="text-center py-6 border-t border-b border-gray-800 mb-6">
-              <div class="text-gray-400 text-lg mb-2">当前叫号</div>
-              <div
-                v-if="getVisitingPatient(dept.name)"
-                class="text-[80px] leading-none font-bold text-white mb-4"
-                :class="{ 'animate-call': lastCallNumber[dept.name] === getVisitingPatient(dept.name)?.queueNumber && showAnimation[dept.name] }"
-              >
-                {{ getVisitingPatient(dept.name)?.queueNumber }}
+              <div class="text-gray-400 text-lg mb-4">当前叫号</div>
+
+              <div v-if="hasAnyVisiting(dept)" class="space-y-3 mb-2">
+                <div
+                  v-for="room in getVisitingRooms(dept)"
+                  :key="room.id"
+                  class="flex items-center justify-center gap-4"
+                >
+                  <span class="text-gray-400 text-base">{{ room.name }}：</span>
+                  <div
+                    :key="room.id + '-' + (room.currentPatient as Patient)?.queueNumber"
+                    class="text-[72px] leading-none font-bold text-white"
+                    :class="{ 'animate-call': showAnimation[room.id] }"
+                  >
+                    {{ (room.currentPatient as Patient)?.queueNumber }}
+                  </div>
+                  <span class="text-2xl text-gray-300">{{ (room.currentPatient as Patient)?.name }}</span>
+                </div>
               </div>
-              <div v-else class="text-[80px] leading-none font-bold text-gray-600 mb-4">--</div>
-              <div v-if="getVisitingPatient(dept.name)" class="text-2xl text-gray-300">
-                {{ getVisitingPatient(dept.name)?.name }}
+              <div v-else>
+                <div class="text-[72px] leading-none font-bold text-gray-600 mb-4">--</div>
+                <div class="text-gray-400">暂无叫号</div>
+              </div>
+
+              <div class="flex justify-center gap-3 mt-4">
+                <div
+                  v-for="room in dept.rooms"
+                  :key="room.id"
+                  class="text-xs px-3 py-1 rounded-full"
+                  :class="room.currentPatient ? 'bg-blue-900/50 text-blue-300' : 'bg-gray-800 text-gray-500'"
+                >
+                  {{ room.name }}：{{ room.currentPatient ? (room.currentPatient as Patient).queueNumber + '号' : '空闲' }}
+                </div>
               </div>
             </div>
 
@@ -73,6 +95,7 @@
                       </span>
                       <span class="text-lg text-[#aaa]">{{ item.name }}</span>
                       <span v-if="item.priority" class="px-2 py-0.5 bg-red-900/50 text-red-300 text-xs rounded-full">优先</span>
+                      <span v-if="item.appointmentTime" class="px-2 py-0.5 bg-purple-900/50 text-purple-300 text-xs rounded-full">预约</span>
                     </div>
                     <div class="flex items-center gap-4">
                       <span
@@ -106,21 +129,21 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, onMounted, onUnmounted, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useQueueStore } from './stores/queue'
 import { formatDuration as formatDur } from './types'
-import type { Patient } from './types'
+import type { Patient, Department, Room } from './types'
 import { RecycleScroller } from 'vue-virtual-scroller'
 import 'vue-virtual-scroller/dist/vue-virtual-scroller.css'
 
 const store = useQueueStore()
 const { departments, lastCallNumber } = storeToRefs(store)
-const { connectWebSocket, disconnectWebSocket, fetchAllData, getVisitingPatient, getDepartmentQueue } = store
+const { connectWebSocket, disconnectWebSocket, fetchAllData, getDepartmentQueue } = store
 
 const currentTime = ref('')
 const currentDate = ref('')
-const showAnimation = ref<Record<string, boolean>>({})
+const showAnimation = ref<Record<number, boolean>>({})
 let timer: ReturnType<typeof setInterval> | null = null
 
 function formatDuration(seconds: number): string {
@@ -138,6 +161,16 @@ function getWaitClass(seconds: number): string {
   return 'text-gray-400'
 }
 
+function hasAnyVisiting(dept: Department): boolean {
+  if (!dept.rooms) return false
+  return dept.rooms.some((r: Room) => r.currentPatient)
+}
+
+function getVisitingRooms(dept: Department): Room[] {
+  if (!dept.rooms) return []
+  return dept.rooms.filter((r: Room) => r.currentPatient)
+}
+
 function updateTime() {
   const now = new Date()
   currentTime.value = now.toLocaleTimeString('zh-CN', { hour12: false })
@@ -150,12 +183,11 @@ function updateTime() {
 }
 
 watch(lastCallNumber, (newVal, oldVal) => {
-  Object.keys(newVal).forEach(dept => {
-    if (newVal[dept] !== oldVal?.[dept]) {
-      showAnimation.value[dept] = true
-      setTimeout(() => {
-        showAnimation.value[dept] = false
-      }, 1500)
+  Object.keys(newVal).forEach(ridStr => {
+    const rid = Number(ridStr)
+    if (newVal[rid] !== oldVal?.[rid]) {
+      showAnimation.value[rid] = true
+      setTimeout(() => { showAnimation.value[rid] = false }, 1500)
     }
   })
 }, { deep: true })

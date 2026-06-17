@@ -7,7 +7,10 @@ export interface Patient {
   queueNumber: number
   status: 'waiting' | 'visiting' | 'completed' | 'missed' | 'preregistered'
   priority: boolean
+  displayPriority?: boolean
+  realPriority?: boolean
   missedCount: number
+  roomId?: number
   checkInTime?: string
   visitStartTime?: string
   visitEndTime?: string
@@ -18,15 +21,23 @@ export interface Patient {
   updatedAt: string
 }
 
+export interface Room {
+  id: number
+  name: string
+  departmentId: number
+  departmentName: string
+  currentPatientId?: number
+  currentPatient?: Patient | null
+}
+
 export interface Department {
   id: number
   name: string
-  currentCall: number
   doctorOnDuty: boolean
   avgVisitDuration: number
   waitingCount?: number
   estimatedWait?: number
-  visiting?: Patient | null
+  rooms?: Room[]
 }
 
 export interface WSMessagePayload {
@@ -34,6 +45,8 @@ export interface WSMessagePayload {
   queue: Patient[]
   deptInfo: Department
   patient?: Patient
+  roomId?: number
+  roomName?: string
 }
 
 export interface WSMessage {
@@ -42,13 +55,23 @@ export interface WSMessage {
 }
 
 export function formatDuration(seconds: number): string {
-  if (seconds < 0) seconds = 0
+  if (!seconds || seconds < 0) seconds = 0
   const hours = Math.floor(seconds / 3600)
   const minutes = Math.floor((seconds % 3600) / 60)
   if (hours > 0) {
     return `${hours}小时${minutes}分`
   }
   return `${minutes}分钟`
+}
+
+export function formatAppointmentTime(timeStr?: string): string {
+  if (!timeStr) return ''
+  try {
+    const d = new Date(timeStr)
+    return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+  } catch {
+    return timeStr
+  }
 }
 
 export function maskName(name: string): string {
@@ -58,11 +81,12 @@ export function maskName(name: string): string {
   return name[0] + '*'.repeat(name.length - 2) + name[name.length - 1]
 }
 
-export function speakQueueNumber(queueNumber: number, name?: string) {
+export function speakQueueNumber(queueNumber: number, name?: string, roomName?: string) {
   if ('speechSynthesis' in window) {
-    const text = name
-      ? `请${name}，${queueNumber}号，到诊室就诊`
-      : `请${queueNumber}号患者到诊室就诊`
+    let text = `请${queueNumber}号`
+    if (name) text = `${name}，${queueNumber}号`
+    if (roomName) text += `，到${roomName}就诊`
+    else text += '患者到诊室就诊'
     const utterance = new SpeechSynthesisUtterance(text)
     utterance.lang = 'zh-CN'
     utterance.rate = 0.9

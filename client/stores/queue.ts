@@ -1,13 +1,13 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import type { Patient, Department, WSMessage } from '../types'
+import type { Patient, Department, Room, WSMessage } from '../types'
 
 export const useQueueStore = defineStore('queue', () => {
   const queue = ref<Patient[]>([])
   const completed = ref<Patient[]>([])
   const departments = ref<Department[]>([])
+  const rooms = ref<Room[]>([])
   const preRegistered = ref<Patient[]>([])
-  const currentVisiting = ref<Record<string, Patient | null>>({})
   const wsConnected = ref(false)
   const lastCallNumber = ref<Record<string, number>>({})
 
@@ -86,7 +86,7 @@ export const useQueueStore = defineStore('queue', () => {
         if (message.payload.queue) {
           const dept = message.payload.department
           const newQueue = message.payload.queue
-          queue.value = queue.value.filter(p => p.department !== dept || p.status !== 'waiting')
+          queue.value = queue.value.filter(p => !(p.department === dept && p.status === 'waiting'))
           queue.value.push(...newQueue)
         }
         if (message.payload.deptInfo) {
@@ -94,16 +94,22 @@ export const useQueueStore = defineStore('queue', () => {
           if (idx >= 0) {
             departments.value[idx] = { ...departments.value[idx], ...message.payload.deptInfo }
           }
-          if (message.payload.deptInfo.visiting) {
-            currentVisiting.value[message.payload.department] = message.payload.deptInfo.visiting as Patient
-          } else {
-            currentVisiting.value[message.payload.department] = null
+          if (message.payload.deptInfo.rooms) {
+            const deptRooms = message.payload.deptInfo.rooms
+            deptRooms.forEach(r => {
+              const ridx = rooms.value.findIndex(rm => rm.id === r.id)
+              if (ridx >= 0) {
+                rooms.value[ridx] = { ...rooms.value[ridx], ...r }
+              } else {
+                rooms.value.push(r as Room)
+              }
+            })
           }
         }
         break
       case 'call_next':
-        if (message.payload.patient) {
-          lastCallNumber.value[message.payload.department] = message.payload.patient.queueNumber
+        if (message.payload.patient && message.payload.roomId) {
+          lastCallNumber.value[String(message.payload.roomId)] = message.payload.patient.queueNumber
         }
         break
     }
@@ -114,6 +120,7 @@ export const useQueueStore = defineStore('queue', () => {
       fetchQueue(),
       fetchCompleted(),
       fetchDepartments(),
+      fetchRooms(),
       fetchPreRegistered()
     ])
   }
@@ -146,14 +153,20 @@ export const useQueueStore = defineStore('queue', () => {
       const res = await fetch('/api/departments')
       if (res.ok) {
         departments.value = await res.json()
-        departments.value.forEach(d => {
-          if (d.visiting) {
-            currentVisiting.value[d.name] = d.visiting as Patient
-          }
-        })
       }
     } catch (e) {
       console.error('Failed to fetch departments:', e)
+    }
+  }
+
+  async function fetchRooms() {
+    try {
+      const res = await fetch('/api/rooms')
+      if (res.ok) {
+        rooms.value = await res.json()
+      }
+    } catch (e) {
+      console.error('Failed to fetch rooms:', e)
     }
   }
 
@@ -196,11 +209,11 @@ export const useQueueStore = defineStore('queue', () => {
     await fetchAllData()
   }
 
-  async function callNext(department: string) {
+  async function callNext(roomId: number) {
     const res = await fetch('/api/call-next', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ department })
+      body: JSON.stringify({ roomId })
     })
     if (!res.ok) throw new Error('叫号失败')
     const result = await res.json()
@@ -244,21 +257,41 @@ export const useQueueStore = defineStore('queue', () => {
     return queue.value
       .filter(p => p.department === department && p.status === 'waiting')
       .sort((a, b) => {
-        if (a.priority !== b.priority) return a.priority ? -1 : 1
+        if ((a.realPriority ?? a.priority) !== (b.realPriority ?? b.priority)) {
+          return (a.realPriority ?? a.priority) ? -1 : 1
+        }
+        if (a.appointmentTime && b.appointmentTime) {
+          return new Date(a.appointmentTime).getTime() - new Date(b.appointmentTime).getTime()
+        }
+        if (a.appointmentTime) return -1
+        if (b.appointmentTime) return 1
         return a.queueNumber - b.queueNumber
       })
   }
 
-  function getVisitingPatient(department: string) {
-    return currentVisiting.value[department] || null
+  function getRoomById(roomId: number | string): Room | undefined {
+    const id = typeof roomId === 'string' ? parseInt(roomId) : roomId
+    return rooms.value.find(r => r.id === id)
+  }
+
+  function getRoomsByDepartment(department: string): Room[] {
+    const dept = departments.value.find(d => d.name === department)
+    if (dept?.rooms) return dept.rooms
+    return rooms.value.filter(r => r.departmentName === department)
+  }
+
+  function getRoomCurrentPatient(roomId: number | string): Patient | null {
+    const room = getRoomById(roomId)
+    if (room?.currentPatient) return room.currentPatient as Patient
+    return null
   }
 
   return {
     queue,
     completed,
     departments,
+    rooms,
     preRegistered,
-    currentVisiting,
     wsConnected,
     lastCallNumber,
     waitingPatients,
@@ -268,6 +301,7 @@ export const useQueueStore = defineStore('queue', () => {
     fetchQueue,
     fetchCompleted,
     fetchDepartments,
+    fetchRooms,
     fetchPreRegistered,
     createPatient,
     activatePatient,
@@ -277,6 +311,8 @@ export const useQueueStore = defineStore('queue', () => {
     prioritizePatient,
     exportCSV,
     getDepartmentQueue,
-    getVisitingPatient
+    getRoomById,
+    getRoomsByDepartment,
+    getRoomCurrentPatient
   }
 })

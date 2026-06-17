@@ -20,7 +20,7 @@
     <div class="flex-1 flex overflow-hidden">
       <div class="w-80 border-r border-gray-200 p-4 overflow-y-auto flex flex-col gap-4">
         <div class="bg-gray-50 rounded-xl p-4">
-          <h2 class="text-lg font-semibold text-gray-800 mb-4">新患者签到</h2>
+          <h2 class="text-lg font-semibold text-gray-800 mb-4">新患者签到 / 预约</h2>
           <form @submit.prevent="handleCreatePatient" class="space-y-4">
             <div>
               <label class="block text-sm font-medium text-gray-700 mb-1">姓名</label>
@@ -53,43 +53,62 @@
                 <option v-for="d in departments" :key="d.id" :value="d.name">{{ d.name }}</option>
               </select>
             </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">
+                预约时间
+                <span class="text-gray-400 font-normal ml-1">（选填，仅电话预约时填写）</span>
+              </label>
+              <input
+                v-model="form.appointmentTime"
+                type="datetime-local"
+                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+              />
+            </div>
             <div class="flex items-center gap-2">
               <input v-model="form.priority" type="checkbox" id="priority" class="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
               <label for="priority" class="text-sm text-gray-700">优先就诊（老人/孕妇）</label>
             </div>
             <div class="flex items-center gap-2">
               <input v-model="form.preRegistered" type="checkbox" id="prereg" class="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500" />
-              <label for="prereg" class="text-sm text-gray-700">仅预约（暂不入队）</label>
+              <label for="prereg" class="text-sm text-gray-700">暂不入队（仅录入预约）</label>
             </div>
             <button
               type="submit"
               class="w-full px-4 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition shadow-sm"
             >
-              签到排号
+              {{ form.preRegistered ? '录入预约' : '签到排号' }}
             </button>
           </form>
         </div>
 
         <div class="bg-gray-50 rounded-xl p-4">
           <h2 class="text-lg font-semibold text-gray-800 mb-3">电话预约待激活</h2>
-          <div v-if="preRegistered.length === 0" class="text-gray-400 text-sm text-center py-4">
+          <div v-if="sortedPreRegistered.length === 0" class="text-gray-400 text-sm text-center py-4">
             暂无预约患者
           </div>
-          <div v-else class="space-y-2 max-h-60 overflow-y-auto">
+          <div v-else class="space-y-2 max-h-64 overflow-y-auto">
             <div
-              v-for="p in preRegistered"
+              v-for="p in sortedPreRegistered"
               :key="p.id"
-              class="bg-white rounded-lg p-3 border border-gray-200 flex items-center justify-between"
+              class="bg-white rounded-lg p-3 border flex items-center justify-between"
+              :class="isAppointmentNear(p) ? 'border-blue-300 bg-blue-50' : 'border-gray-200'"
             >
-              <div>
-                <div class="font-medium text-gray-800">{{ p.name }}</div>
-                <div class="text-xs text-gray-500">{{ p.department }} · {{ p.phoneLast4 || '无手机' }}</div>
+              <div class="flex-1 min-w-0">
+                <div class="font-medium text-gray-800 flex items-center gap-2">
+                  {{ p.name }}
+                  <span v-if="isAppointmentNear(p)" class="px-1.5 py-0.5 bg-blue-500 text-white text-[10px] rounded">临近</span>
+                  <span v-if="p.priority" class="px-1.5 py-0.5 bg-red-100 text-red-600 text-[10px] rounded">优先</span>
+                </div>
+                <div class="text-xs text-gray-500 mt-0.5">{{ p.department }} · {{ p.phoneLast4 || '无手机' }}</div>
+                <div v-if="p.appointmentTime" class="text-xs text-blue-600 mt-1">
+                  预约：{{ formatAppointmentTime(p.appointmentTime) }}
+                </div>
               </div>
               <button
                 @click="handleActivate(p.id)"
-                class="px-3 py-1 bg-green-500 hover:bg-green-600 text-white text-sm rounded-lg transition"
+                class="ml-2 px-3 py-1 bg-green-500 hover:bg-green-600 text-white text-sm rounded-lg transition shrink-0"
               >
-                激活入队
+                激活
               </button>
             </div>
           </div>
@@ -115,7 +134,7 @@
 
         <div class="flex-1 overflow-auto">
           <table class="w-full">
-            <thead class="bg-gray-50 sticky top-0">
+            <thead class="bg-gray-50 sticky top-0 z-10">
               <tr>
                 <th class="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">排队号</th>
                 <th class="px-4 py-3 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">患者信息</th>
@@ -135,6 +154,9 @@
                 <td class="px-4 py-3">
                   <span class="text-2xl font-bold text-clinic-blue">{{ p.queueNumber }}</span>
                   <span v-if="p.priority" class="ml-2 px-2 py-0.5 bg-red-100 text-red-600 text-xs rounded-full">优先</span>
+                  <span v-if="p.appointmentTime && p.status === 'waiting'" class="ml-1 px-2 py-0.5 bg-purple-100 text-purple-600 text-xs rounded-full">
+                    预约 {{ formatAppointmentTime(p.appointmentTime) }}
+                  </span>
                 </td>
                 <td class="px-4 py-3">
                   <div class="font-medium text-gray-800">{{ p.name }}</div>
@@ -157,7 +179,7 @@
                 <td class="px-4 py-3">
                   <div class="flex gap-2">
                     <button
-                      v-if="p.status === 'waiting' && !p.priority"
+                      v-if="p.status === 'waiting' && !(p.realPriority ?? p.priority)"
                       @click="handlePrioritize(p.id)"
                       class="px-2 py-1 bg-orange-500 hover:bg-orange-600 text-white text-xs rounded transition"
                     >
@@ -211,7 +233,7 @@
                 @click="handleRequeue(p.id)"
                 class="mt-2 w-full px-3 py-1.5 bg-green-500 hover:bg-green-600 text-white text-sm rounded-lg transition"
               >
-                重新入队
+                重新入队（队尾+新号）
               </button>
             </div>
           </div>
@@ -220,21 +242,37 @@
     </div>
 
     <footer class="border-t border-gray-200 bg-gray-50 px-6 py-3">
-      <div class="flex items-center gap-6 flex-wrap">
+      <div class="flex items-start gap-6 flex-wrap">
         <div
           v-for="d in departments"
           :key="d.id"
-          class="flex items-center gap-2 bg-white px-4 py-2 rounded-lg shadow-sm border border-gray-200"
+          class="bg-white px-4 py-3 rounded-lg shadow-sm border border-gray-200 min-w-[260px]"
         >
-          <span class="font-medium text-gray-700">{{ d.name }}</span>
-          <span class="text-sm text-gray-500">候诊:</span>
-          <span class="font-bold text-clinic-blue">{{ d.waitingCount ?? 0 }}</span>
-          <span class="text-sm text-gray-500">平均等待:</span>
-          <span class="font-medium text-gray-700">{{ formatDuration(d.estimatedWait ?? 0) }}</span>
-          <span
-            class="w-2 h-2 rounded-full"
-            :class="d.doctorOnDuty ? 'bg-green-500' : 'bg-red-500'"
-          ></span>
+          <div class="flex items-center justify-between mb-2">
+            <span class="font-semibold text-gray-800">{{ d.name }}</span>
+            <span
+              class="w-2.5 h-2.5 rounded-full"
+              :class="d.doctorOnDuty ? 'bg-green-500' : 'bg-red-500'"
+            ></span>
+          </div>
+          <div class="text-sm text-gray-500 mb-2">
+            候诊 <span class="font-bold text-clinic-blue text-base">{{ d.waitingCount ?? 0 }}</span> 人
+            · 平均等待 <span class="text-gray-700 font-medium">{{ formatDuration(d.estimatedWait ?? 0) }}</span>
+          </div>
+          <div class="flex flex-wrap gap-1.5">
+            <div
+              v-for="r in d.rooms"
+              :key="r.id"
+              class="text-xs px-2 py-1 rounded-md bg-gray-100 flex items-center gap-1"
+              :class="r.currentPatient ? 'bg-blue-50 border border-blue-200' : ''"
+            >
+              <span class="text-gray-500">{{ r.name }}</span>
+              <span v-if="r.currentPatient" class="font-bold text-clinic-blue">
+                {{ (r.currentPatient as Patient).queueNumber }}号
+              </span>
+              <span v-else class="text-gray-400">空闲</span>
+            </div>
+          </div>
         </div>
       </div>
     </footer>
@@ -245,23 +283,38 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useQueueStore } from './stores/queue'
-import { formatDuration as formatDur, speakQueueNumber, maskName } from './types'
+import { formatDuration as formatDur, speakQueueNumber, maskName, formatAppointmentTime as fmtAppt } from './types'
 import type { Patient } from './types'
 
 const store = useQueueStore()
 const { queue, completed, departments, preRegistered, wsConnected } = storeToRefs(store)
-const { connectWebSocket, disconnectWebSocket, fetchAllData, createPatient, activatePatient, prioritizePatient, markMissed, requeuePatient, exportCSV } = store
+const {
+  connectWebSocket, disconnectWebSocket, fetchAllData,
+  createPatient, activatePatient, prioritizePatient, markMissed, requeuePatient, exportCSV
+} = store
 
 const form = ref({
   name: '',
   phoneLast4: '',
   department: '',
+  appointmentTime: '',
   priority: false,
   preRegistered: false
 })
 
 const filterDept = ref('')
 const tickTimer = ref<ReturnType<typeof setInterval> | null>(null)
+
+const sortedPreRegistered = computed(() => {
+  return [...preRegistered.value].sort((a, b) => {
+    if (a.appointmentTime && b.appointmentTime) {
+      return new Date(a.appointmentTime).getTime() - new Date(b.appointmentTime).getTime()
+    }
+    if (a.appointmentTime) return -1
+    if (b.appointmentTime) return 1
+    return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+  })
+})
 
 const filteredQueue = computed(() => {
   let result = queue.value.filter(p => p.status === 'waiting' || p.status === 'visiting')
@@ -272,13 +325,30 @@ const filteredQueue = computed(() => {
     if (a.status !== b.status) {
       return a.status === 'visiting' ? -1 : 1
     }
-    if (a.priority !== b.priority) return a.priority ? -1 : 1
+    if ((a.realPriority ?? a.priority) !== (b.realPriority ?? b.priority)) {
+      return (a.realPriority ?? a.priority) ? -1 : 1
+    }
+    if (a.appointmentTime && b.appointmentTime) {
+      return new Date(a.appointmentTime).getTime() - new Date(b.appointmentTime).getTime()
+    }
+    if (a.appointmentTime) return -1
+    if (b.appointmentTime) return 1
     return a.queueNumber - b.queueNumber
   })
 })
 
 function formatDuration(seconds: number) {
   return formatDur(seconds)
+}
+
+function formatAppointmentTime(t?: string) {
+  return fmtAppt(t)
+}
+
+function isAppointmentNear(p: Patient): boolean {
+  if (!p.appointmentTime) return false
+  const diff = new Date(p.appointmentTime).getTime() - Date.now()
+  return diff < 30 * 60 * 1000
 }
 
 function getWaitDuration(p: Patient): number {
@@ -322,13 +392,17 @@ function getStatusText(status: string): string {
 
 async function handleCreatePatient() {
   try {
-    const result = await createPatient({
+    const payload: any = {
       name: form.value.name,
       phoneLast4: form.value.phoneLast4,
       department: form.value.department,
       priority: form.value.priority,
       preRegistered: form.value.preRegistered
-    })
+    }
+    if (form.value.appointmentTime) {
+      payload.appointmentTime = new Date(form.value.appointmentTime).toISOString()
+    }
+    const result = await createPatient(payload)
 
     if (!form.value.preRegistered) {
       speakQueueNumber(result.queueNumber, maskName(form.value.name))
@@ -338,6 +412,7 @@ async function handleCreatePatient() {
       name: '',
       phoneLast4: '',
       department: '',
+      appointmentTime: '',
       priority: false,
       preRegistered: false
     }
@@ -372,6 +447,7 @@ async function handleMissed(id: number) {
 }
 
 async function handleRequeue(id: number) {
+  if (!confirm('重新入队将分配新排队号并排到队尾，确认？')) return
   try {
     await requeuePatient(id)
   } catch (e: any) {
@@ -390,8 +466,7 @@ async function handleExport() {
 onMounted(() => {
   fetchAllData()
   connectWebSocket('reception')
-  tickTimer.value = setInterval(() => {
-  }, 1000)
+  tickTimer.value = setInterval(() => {}, 1000)
 })
 
 onUnmounted(() => {
