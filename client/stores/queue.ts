@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import type { Patient, Department, Room, WSMessage } from '../types'
+import type { Patient, Department, Room, WSMessage, DashboardResponse, PatientStatus } from '../types'
 
 export const useQueueStore = defineStore('queue', () => {
   const queue = ref<Patient[]>([])
@@ -8,8 +8,11 @@ export const useQueueStore = defineStore('queue', () => {
   const departments = ref<Department[]>([])
   const rooms = ref<Room[]>([])
   const preRegistered = ref<Patient[]>([])
+  const dashboard = ref<DashboardResponse | null>(null)
   const wsConnected = ref(false)
   const lastCallNumber = ref<Record<string, number>>({})
+  const filterDepartment = ref<string>('全部')
+  const filterStatus = ref<PatientStatus | '全部'>('全部')
 
   let ws: WebSocket | null = null
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
@@ -17,6 +20,18 @@ export const useQueueStore = defineStore('queue', () => {
   const waitingPatients = computed(() =>
     queue.value.filter(p => p.status === 'waiting')
   )
+
+  const allStatusPatients = computed(() => {
+    return [...queue.value, ...completed.value, ...preRegistered.value]
+  })
+
+  const filteredPatients = computed(() => {
+    return allStatusPatients.value.filter(p => {
+      if (filterDepartment.value !== '全部' && p.department !== filterDepartment.value) return false
+      if (filterStatus.value !== '全部' && p.status !== filterStatus.value) return false
+      return true
+    })
+  })
 
   function connectWebSocket(role: string = 'reception', roomId: string = '') {
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
@@ -121,7 +136,8 @@ export const useQueueStore = defineStore('queue', () => {
       fetchCompleted(),
       fetchDepartments(),
       fetchRooms(),
-      fetchPreRegistered()
+      fetchPreRegistered(),
+      fetchDashboard()
     ])
   }
 
@@ -178,6 +194,17 @@ export const useQueueStore = defineStore('queue', () => {
       }
     } catch (e) {
       console.error('Failed to fetch preregistered:', e)
+    }
+  }
+
+  async function fetchDashboard() {
+    try {
+      const res = await fetch('/api/dashboard')
+      if (res.ok) {
+        dashboard.value = await res.json()
+      }
+    } catch (e) {
+      console.error('Failed to fetch dashboard:', e)
     }
   }
 
@@ -292,9 +319,14 @@ export const useQueueStore = defineStore('queue', () => {
     departments,
     rooms,
     preRegistered,
+    dashboard,
     wsConnected,
     lastCallNumber,
+    filterDepartment,
+    filterStatus,
     waitingPatients,
+    allStatusPatients,
+    filteredPatients,
     connectWebSocket,
     disconnectWebSocket,
     fetchAllData,
@@ -303,6 +335,7 @@ export const useQueueStore = defineStore('queue', () => {
     fetchDepartments,
     fetchRooms,
     fetchPreRegistered,
+    fetchDashboard,
     createPatient,
     activatePatient,
     callNext,

@@ -528,6 +528,7 @@ func requeuePatient(c *gin.Context) {
 	patient.DisplayPriority = true
 	patient.Priority = false
 	patient.RoomID = nil
+	patient.AppointmentTime = nil
 	now := time.Now()
 	patient.CheckInTime = &now
 
@@ -718,11 +719,87 @@ func getPreRegistered(c *gin.Context) {
 	c.JSON(http.StatusOK, patients)
 }
 
+type DeptDashboard struct {
+	Department     string `json:"department"`
+	CheckedIn      int64  `json:"checkedIn"`
+	Waiting        int64  `json:"waiting"`
+	Visiting       int64  `json:"visiting"`
+	Completed      int64  `json:"completed"`
+	Missed         int64  `json:"missed"`
+	PreRegistered  int64  `json:"preRegistered"`
+	TotalSeen      int64  `json:"totalSeen"`
+	MissedCountSum int64  `json:"missedCountSum"`
+	ApptActivated  int64  `json:"apptActivated"`
+}
+
+func getDashboard(c *gin.Context) {
+	var departments []Department
+	db.Find(&departments)
+
+	results := make([]DeptDashboard, 0, len(departments))
+	totals := DeptDashboard{Department: "合计"}
+
+	for _, d := range departments {
+		stat := DeptDashboard{Department: d.Name}
+
+		db.Model(&Patient{}).Where("department = ? AND DATE(created_at) = DATE('now') AND status != ?",
+			d.Name, StatusPreRegistered).Count(&stat.CheckedIn)
+		db.Model(&Patient{}).Where("department = ? AND DATE(created_at) = DATE('now') AND status = ?",
+			d.Name, StatusWaiting).Count(&stat.Waiting)
+		db.Model(&Patient{}).Where("department = ? AND DATE(created_at) = DATE('now') AND status = ?",
+			d.Name, StatusVisiting).Count(&stat.Visiting)
+		db.Model(&Patient{}).Where("department = ? AND DATE(created_at) = DATE('now') AND status = ?",
+			d.Name, StatusCompleted).Count(&stat.Completed)
+		db.Model(&Patient{}).Where("department = ? AND DATE(created_at) = DATE('now') AND status = ?",
+			d.Name, StatusMissed).Count(&stat.Missed)
+		db.Model(&Patient{}).Where("department = ? AND status = ?",
+			d.Name, StatusPreRegistered).Count(&stat.PreRegistered)
+
+		stat.TotalSeen = stat.Completed + stat.Missed
+
+		var missedRows []Patient
+		db.Select("COALESCE(SUM(missed_count), 0) as missed_count").
+			Where("department = ? AND DATE(created_at) = DATE('now')", d.Name).
+			Find(&missedRows)
+		for _, r := range missedRows {
+			stat.MissedCountSum += int64(r.MissedCount)
+		}
+
+		var activatedCount int64
+		db.Model(&Patient{}).
+			Where("department = ? AND DATE(created_at) = DATE('now') AND appointment_time IS NOT NULL AND status != ?",
+				d.Name, StatusPreRegistered).
+			Count(&activatedCount)
+		stat.ApptActivated = activatedCount
+
+		results = append(results, stat)
+
+		totals.CheckedIn += stat.CheckedIn
+		totals.Waiting += stat.Waiting
+		totals.Visiting += stat.Visiting
+		totals.Completed += stat.Completed
+		totals.Missed += stat.Missed
+		totals.PreRegistered += stat.PreRegistered
+		totals.TotalSeen += stat.TotalSeen
+		totals.MissedCountSum += stat.MissedCountSum
+		totals.ApptActivated += stat.ApptActivated
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"byDepartment": results,
+		"totals":       totals,
+		"generatedAt":  time.Now(),
+	})
+}
+
 func exportCSV(c *gin.Context) {
 	var patients []Patient
 	db.Where("DATE(created_at) = DATE('now')").
 		Order("created_at ASC").
 		Find(&patients)
+
+	var departments []Department
+	db.Find(&departments)
 
 	c.Header("Content-Type", "text/csv; charset=utf-8")
 	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=clinic_records_%s.csv", time.Now().Format("20060102")))
@@ -731,6 +808,92 @@ func exportCSV(c *gin.Context) {
 	writer := csv.NewWriter(c.Writer)
 	defer writer.Flush()
 
+	statusMap := map[PatientStatus]string{
+		StatusWaiting:       "候诊",
+		StatusVisiting:      "就诊中",
+		StatusCompleted:     "已完成",
+		StatusMissed:        "已过号",
+		StatusPreRegistered: "已预约",
+	}
+
+	writer.Write([]string{"===== 科室汇总 ====="})
+	writer.Write([]string{"科室", "已签到", "候诊中", "就诊中", "已完成", "过号", "预约待激活", "总接诊", "过号次数合计", "预约激活数"})
+
+	deptStats := make(map[string]*DeptDashboard)
+	totals := &DeptDashboard{Department: "合计"}
+
+	for _, d := range departments {
+		stat := &DeptDashboard{Department: d.Name}
+		db.Model(&Patient{}).Where("department = ? AND DATE(created_at) = DATE('now') AND status != ?",
+			d.Name, StatusPreRegistered).Count(&stat.CheckedIn)
+		db.Model(&Patient{}).Where("department = ? AND DATE(created_at) = DATE('now') AND status = ?",
+			d.Name, StatusWaiting).Count(&stat.Waiting)
+		db.Model(&Patient{}).Where("department = ? AND DATE(created_at) = DATE('now') AND status = ?",
+			d.Name, StatusVisiting).Count(&stat.Visiting)
+		db.Model(&Patient{}).Where("department = ? AND DATE(created_at) = DATE('now') AND status = ?",
+			d.Name, StatusCompleted).Count(&stat.Completed)
+		db.Model(&Patient{}).Where("department = ? AND DATE(created_at) = DATE('now') AND status = ?",
+			d.Name, StatusMissed).Count(&stat.Missed)
+		db.Model(&Patient{}).Where("department = ? AND status = ?",
+			d.Name, StatusPreRegistered).Count(&stat.PreRegistered)
+		stat.TotalSeen = stat.Completed + stat.Missed
+
+		var missedRows []Patient
+		db.Model(&Patient{}).
+			Where("department = ? AND DATE(created_at) = DATE('now')", d.Name).
+			Find(&missedRows)
+		for _, r := range missedRows {
+			stat.MissedCountSum += int64(r.MissedCount)
+		}
+
+		var activatedCount int64
+		db.Model(&Patient{}).
+			Where("department = ? AND DATE(created_at) = DATE('now') AND appointment_time IS NOT NULL AND status != ?",
+				d.Name, StatusPreRegistered).
+			Count(&activatedCount)
+		stat.ApptActivated = activatedCount
+
+		deptStats[d.Name] = stat
+
+		writer.Write([]string{
+			stat.Department,
+			strconv.FormatInt(stat.CheckedIn, 10),
+			strconv.FormatInt(stat.Waiting, 10),
+			strconv.FormatInt(stat.Visiting, 10),
+			strconv.FormatInt(stat.Completed, 10),
+			strconv.FormatInt(stat.Missed, 10),
+			strconv.FormatInt(stat.PreRegistered, 10),
+			strconv.FormatInt(stat.TotalSeen, 10),
+			strconv.FormatInt(stat.MissedCountSum, 10),
+			strconv.FormatInt(stat.ApptActivated, 10),
+		})
+
+		totals.CheckedIn += stat.CheckedIn
+		totals.Waiting += stat.Waiting
+		totals.Visiting += stat.Visiting
+		totals.Completed += stat.Completed
+		totals.Missed += stat.Missed
+		totals.PreRegistered += stat.PreRegistered
+		totals.TotalSeen += stat.TotalSeen
+		totals.MissedCountSum += stat.MissedCountSum
+		totals.ApptActivated += stat.ApptActivated
+	}
+
+	writer.Write([]string{
+		totals.Department,
+		strconv.FormatInt(totals.CheckedIn, 10),
+		strconv.FormatInt(totals.Waiting, 10),
+		strconv.FormatInt(totals.Visiting, 10),
+		strconv.FormatInt(totals.Completed, 10),
+		strconv.FormatInt(totals.Missed, 10),
+		strconv.FormatInt(totals.PreRegistered, 10),
+		strconv.FormatInt(totals.TotalSeen, 10),
+		strconv.FormatInt(totals.MissedCountSum, 10),
+		strconv.FormatInt(totals.ApptActivated, 10),
+	})
+
+	writer.Write([]string{})
+	writer.Write([]string{"===== 患者明细 ====="})
 	writer.Write([]string{"排队号", "姓名", "科室", "诊室", "签到时间", "就诊开始时间", "就诊结束时间", "就诊时长(秒)", "状态", "过号次数", "预约时间"})
 
 	for _, p := range patients {
@@ -757,14 +920,6 @@ func exportCSV(c *gin.Context) {
 			if err := db.First(&r, *p.RoomID).Error; err == nil {
 				roomName = r.Name
 			}
-		}
-
-		statusMap := map[PatientStatus]string{
-			StatusWaiting:       "候诊",
-			StatusVisiting:      "就诊中",
-			StatusCompleted:     "已完成",
-			StatusMissed:        "已过号",
-			StatusPreRegistered: "已预约",
 		}
 
 		writer.Write([]string{
@@ -890,6 +1045,7 @@ func main() {
 		api.GET("/departments", getDepartments)
 		api.GET("/rooms", getRooms)
 		api.GET("/preregistered", getPreRegistered)
+		api.GET("/dashboard", getDashboard)
 		api.GET("/export", exportCSV)
 	}
 

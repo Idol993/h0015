@@ -40,6 +40,27 @@ export interface Department {
   rooms?: Room[]
 }
 
+export interface DeptDashboard {
+  department: string
+  checkedIn: number
+  waiting: number
+  visiting: number
+  completed: number
+  missed: number
+  preRegistered: number
+  totalSeen: number
+  missedCountSum: number
+  apptActivated: number
+}
+
+export interface DashboardResponse {
+  byDepartment: DeptDashboard[]
+  totals: DeptDashboard
+  generatedAt: string
+}
+
+export type PatientStatus = 'waiting' | 'visiting' | 'completed' | 'missed' | 'preregistered'
+
 export interface WSMessagePayload {
   department: string
   queue: Patient[]
